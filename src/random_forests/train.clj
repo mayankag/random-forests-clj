@@ -16,7 +16,9 @@
   [kind]
   (case kind
     "text"       (fn [x] (set (text-tokens x)))
-    "continuous" (fn [x] (Double/parseDouble x))
+    "continuous" (fn [x]
+                   (try (Double/parseDouble x)
+                        (catch java.lang.NumberFormatException e nil)))
     identity))
 
 (defn csv-from-path
@@ -66,6 +68,25 @@
        (rf/avg)
        (float)))
 
+(defn parse-target
+  [input]
+  (-> (clojure.string/split input #"=") first))
+
+(defn target-index
+  [header target-name]
+  (->> header
+       (keep-indexed (fn [i x] (if (= x target-name) i)))
+       (first)))
+
+(defn parse-examples
+  [header input target-index encoding]
+  (->> (named-examples header input)
+       (map #(map (fn [[name val]]
+                    ((get encoding name identity)  val)) %))
+       (map vec)
+       (map (fn [z] (conj z (nth z target-index))))  ;; target is at end
+       (filter #(not (nil? (last %))))))
+
 (defn -main
   [& args]
   (let [[options args banner] (cli args
@@ -84,16 +105,9 @@
     (let [input            (csv-from-path (first args))
           [header & input] input
           encoding         (encoding-fns (conj (:features options) (:target options)))
-          target-name      (-> (clojure.string/split (:target options) #"=") first)
-          target-index     (->> header
-                                (keep-indexed (fn [i x] (if (= x target-name) i)))
-                                (first))
-          examples         (->> (named-examples header input)
-                                (map #(map (fn [[name val]] (try ((get encoding name identity)  val) (catch java.lang.NumberFormatException e nil))) %))
-                                (map vec)
-                                (map (fn [z] (conj z (nth z target-index))))  ;; target is at end
-                                (filter #(not (nil? (last %))))
-                                )
+          target-name      (parse-target (:target options))
+          target-index     (target-index header target-name)
+          examples         (parse-examples header input target-index encoding)
           features         (set (features header (:features options)))]
       (let [forest      (take (:limit options)
                               (rf/build-random-forest examples features (:split options) (:size options)))
