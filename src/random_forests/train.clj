@@ -79,13 +79,38 @@
        (first)))
 
 (defn parse-examples
-  [header input target-index encoding]
-  (->> (named-examples header input)
-       (map #(map (fn [[name val]]
-                    ((get encoding name identity)  val)) %))
-       (map vec)
-       (map (fn [z] (conj z (nth z target-index))))  ;; target is at end
-       (filter #(not (nil? (last %))))))
+  ([header input encoding]
+     (->> (named-examples header input)
+          (map #(map (fn [[name val]]
+                       ((get encoding name identity)  val)) %))
+          (map vec)))
+  ([header input encoding target-index]
+     (->> (parse-examples header input encoding)
+          (map (fn [z] (conj z (nth z target-index))))  ;; target is at end
+          (filter #(not (nil? (last %)))))))
+
+(defn write-output
+  [options evaluation trees]
+  (spit (:output options)
+        (->> evaluation
+             (map (fn [[a b]] [(count trees) a b (if (:multi options) (if (= a b) 1 0) (- a b))]))
+             (map #(str (clojure.string/join "," %) "\n"))
+             (reduce str))
+        :append true))
+
+(defn write-test-csv
+  [options trees test-examples test-header target-name]
+  (let [num-trees (count trees)
+        output-file (str "prediction-" target-name "-" num-trees ".csv")]
+    (spit output-file
+          (str
+           (clojure.string/join "," (conj test-header target-name)) "\n"
+           (->> test-examples
+               (map #(rf/votes trees %))
+               (map rf/avg)
+               (map #(conj %1 %2) test-examples)
+               (map #(str (clojure.string/join "," %) "\n"))
+               (reduce str))))))
 
 (defn -main
   [& args]
@@ -98,16 +123,21 @@
                                    ["-t" "--target" "Prediction target name"]
                                    ["-b" "--binary" "Perform binary classification of target (measures AUC loss)" :default false :flag true]
                                    ["-u" "--multi" "Perform multi-class classification of target (measures classification rate)" :default false :flag true]
-                                   ["-l" "--limit" "Number of trees to build" :parse-fn #(Integer/parseInt %) :default 100])]
+                                   ["-l" "--limit" "Number of trees to build" :parse-fn #(Integer/parseInt %) :default 100]
+                                   ["-q" "--test" "test file"])]
     (when (or (not (first args)) (:help options))
       (println banner)
       (System/exit 0))
     (let [input            (csv-from-path (first args))
+          [test-header & test-input]     (when (:test options)
+                                           (csv-from-path (:test options)))
           [header & input] input
           encoding         (encoding-fns (conj (:features options) (:target options)))
           target-name      (parse-target (:target options))
           target-index     (target-index header target-name)
-          examples         (parse-examples header input target-index encoding)
+          examples         (parse-examples header input encoding target-index)
+          test-examples    (when test-input
+                             (parse-examples header test-input encoding))
           features         (set (features header (:features options)))]
       (let [forest      (take (:limit options)
                               (rf/build-random-forest examples features (:split options) (:size options)))
@@ -121,11 +151,9 @@
                 loss       (-> evaluation
                                ((if (:binary options) auc-loss (if (:multi options) mean-classification-error mean-absolute-loss))))]
             (println (format "%d: %f" (count trees) loss))
-            (if (:output options)
-              (spit (:output options)
-                    (->> evaluation
-                         (map (fn [[a b]] [(count trees) a b (if (:multi options) (if (= a b) 1 0) (- a b))]))
-                         (map #(str (clojure.string/join "," %) "\n"))
-                         (reduce str))
-                    :append true)))))
+            ;; write a test file if present
+            (when test-input
+              (write-test-csv options trees test-examples test-header target-name))
+            (when (:output options)
+              (write-output options evaluation trees)))))
       (shutdown-agents))))
